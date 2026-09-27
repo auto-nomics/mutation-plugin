@@ -1,0 +1,177 @@
+schema_version = 1
+plugin_name = "mutation"
+
+[image]
+reference = "ghcr.io/auto-nomics/autonomics/mutation-analysis@sha256:6f33327237fb5b5cb01b65b194244a742d791a0466844a6f5a9e18af2f99158a"
+tag = "0.1.0"
+upstream = "Bioconductor maftools >= 2.20.0 on bioconductor/bioconductor @ 359702d"
+license = "MIT"
+
+# Two nodes, one image, no panels. The v0 PortLayout has no optional input
+# ports (compile_ports emits required ports only), so the legacy wrapper's
+# conditional clinical input (port_layout(with_clinical)) cannot be one kind
+# with a sometimes-connected second port. The family therefore splits by
+# port layout — the documented family rule allows several [[nodes]] when
+# they share image and panel bindings, and both entries here share this
+# image and the empty panel set. When the planned dynamic-port wave lands,
+# the two kinds can collapse back into one.
+[[nodes]]
+kind = "mutation_analysis"
+desc = "Runs pinned R maftools mutation analyses in an ephemeral OCI container."
+doc = """
+Runs one maftools-backed mutation analysis over a MAF file. Input port 0
+(maf) is a tab-separated MAF File; the nine column-mapping parameters
+default to the standard MAF headers and can be retargeted per input.
+operation selects the analysis: tmb (per-sample mutations per Mb, with an
+optional Wilcoxon group comparison), summary (counts and fractions by
+variant classification/type/SNV class), top_genes (genes ranked by
+mutation and sample counts), titv (per-sample transition/transversion
+statistics), or mutex (Fisher-exact co-occurrence vs mutual exclusivity
+over the top altered genes). This one-input kind covers every operation;
+grouped TMB additionally needs the clinical table, which is what the
+mutation_analysis_clinical kind (second input port) provides. Output port
+0 is the TSV report (mutation_analysis_report.tsv) and output port 1 the
+SHA-256-fingerprinted JSON provenance artifact
+(mutation_analysis_details.json); consume them as files downstream. The
+network is disabled and the root filesystem is read-only.
+"""
+timeout_secs = 3600
+artifact_prefix = "/artifacts/mutation_analysis"
+
+[nodes.ports]
+inputs = [{ type = "file", label = "maf" }]
+outputs = [
+  { path = "mutation_analysis_report.tsv", format = "mutation_analysis_report_tsv" },
+  { path = "mutation_analysis_details.json", format = "mutation_analysis_details_json" },
+]
+
+[nodes.params]
+maf_path = { type = "string", doc = "Provenance label for the MAF File connected to input port 0" }
+clinical_path = { type = "string", optional = true, doc = "Provenance label recorded when a clinical table is wired on the clinical input port (mutation_analysis_clinical kind)" }
+# v0 has no enum param type, so the legacy snake_case
+# MutationAnalysisOperation enum becomes a string with the legacy default;
+# the script's switch keeps the exact legacy dispatch and its
+# "unsupported operation" stop.
+operation = { type = "string", default = "tmb", doc = "Analysis to run: tmb, summary, top_genes, titv, or mutex" }
+panel_size_mb = { type = "number", default = 38.0, exclusive_min = 0.0, doc = "Callable panel size in megabases used as the TMB denominator" }
+tmb_group_col = { type = "string", default = "group", doc = "Clinical-table column holding the group labels used by the grouped TMB comparison" }
+# Legacy validate() requires exactly two distinct nonempty labels and
+# operation = tmb when set; the DSL cannot express distinctness or
+# cross-field gates, so the script enforces both with the legacy messages.
+tmb_groups = { type = "string_array", optional = true, doc = "Exactly two distinct clinical group labels to compare with a Wilcoxon TMB test (tmb operation only)" }
+top_n = { type = "int", default = 20, min = 1.0, doc = "Number of genes reported by the top_genes operation" }
+gene_col = { type = "string", default = "Hugo_Symbol", doc = "MAF column holding the gene symbol" }
+variant_col = { type = "string", default = "Variant_Classification", doc = "MAF column holding the variant classification" }
+tumor_sample_col = { type = "string", default = "Tumor_Sample_Barcode", doc = "MAF column holding the tumor sample identifier" }
+variant_type_col = { type = "string", default = "Variant_Type", doc = "MAF column holding the variant type" }
+chromosome_col = { type = "string", default = "Chromosome", doc = "MAF column holding the chromosome" }
+start_position_col = { type = "string", default = "Start_Position", doc = "MAF column holding the start position" }
+end_position_col = { type = "string", default = "End_Position", doc = "MAF column holding the end position" }
+reference_allele_col = { type = "string", default = "Reference_Allele", doc = "MAF column holding the reference allele" }
+tumor_seq_allele_col = { type = "string", default = "Tumor_Seq_Allele2", doc = "MAF column holding the tumor seq allele 2" }
+
+[nodes.command]
+interpreter = "Rscript"
+script_file = "scripts/mutation_analysis.R.sh"
+
+[nodes.command.env]
+MUTATION_OPERATION = "{{ operation }}"
+MUTATION_PANEL_SIZE_MB = "{{ panel_size_mb }}"
+MUTATION_TMB_GROUP_COL = "{{ tmb_group_col }}"
+MUTATION_TMB_GROUPS = "{{ tmb_groups }}"
+MUTATION_TOP_N = "{{ top_n }}"
+MUTATION_GENE_COL = "{{ gene_col }}"
+MUTATION_VARIANT_COL = "{{ variant_col }}"
+MUTATION_TUMOR_SAMPLE_COL = "{{ tumor_sample_col }}"
+MUTATION_VARIANT_TYPE_COL = "{{ variant_type_col }}"
+MUTATION_CHROMOSOME_COL = "{{ chromosome_col }}"
+MUTATION_START_POSITION_COL = "{{ start_position_col }}"
+MUTATION_END_POSITION_COL = "{{ end_position_col }}"
+MUTATION_REFERENCE_ALLELE_COL = "{{ reference_allele_col }}"
+MUTATION_TUMOR_SEQ_ALLELE_COL = "{{ tumor_seq_allele_col }}"
+
+# Legacy DEFAULT_CPUS/DEFAULT_MEMORY/DEFAULT_PIDS_LIMIT and the hardcoded
+# shm_size, replicated exactly (the legacy spec's optional per-instance
+# overrides resolved to these same values when omitted). network/
+# read_only_rootfs/pull_policy keep the hardened defaults (isolated, true,
+# missing), which match the legacy wrapper exactly.
+[nodes.resources]
+cpus = 2.0
+memory = "8Gi"
+pids_limit = 512
+shm_size = "1Gi"
+
+[[nodes]]
+kind = "mutation_analysis_clinical"
+desc = "Runs pinned R maftools mutation analyses with a clinical table for grouped TMB comparisons."
+doc = """
+The clinical-input variant of mutation_analysis: identical parameters,
+image, and outputs, plus input port 1 (clinical) — a tab-separated
+clinical File whose sample identifiers match the MAF
+Tumor_Sample_Barcode values. The v0 port DSL cannot mark an input
+optional, so the two layouts are separate kinds rather than one
+sometimes-connected port. Set tmb_groups to exactly two distinct group
+labels from tmb_group_col to enable the per-sample Wilcoxon TMB
+comparison between them; every operation behaves exactly as in
+mutation_analysis otherwise. Output port 0 is the TSV report
+(mutation_analysis_report.tsv) and output port 1 the
+SHA-256-fingerprinted JSON provenance artifact
+(mutation_analysis_details.json). The network is disabled and the root
+filesystem is read-only.
+"""
+timeout_secs = 3600
+artifact_prefix = "/artifacts/mutation_analysis_clinical"
+
+[nodes.ports]
+inputs = [
+  { type = "file", label = "maf" },
+  { type = "file", label = "clinical" },
+]
+outputs = [
+  { path = "mutation_analysis_report.tsv", format = "mutation_analysis_report_tsv" },
+  { path = "mutation_analysis_details.json", format = "mutation_analysis_details_json" },
+]
+
+[nodes.params]
+maf_path = { type = "string", doc = "Provenance label for the MAF File connected to input port 0" }
+clinical_path = { type = "string", optional = true, doc = "Provenance label for the clinical File connected to input port 1" }
+operation = { type = "string", default = "tmb", doc = "Analysis to run: tmb, summary, top_genes, titv, or mutex" }
+panel_size_mb = { type = "number", default = 38.0, exclusive_min = 0.0, doc = "Callable panel size in megabases used as the TMB denominator" }
+tmb_group_col = { type = "string", default = "group", doc = "Clinical-table column holding the group labels used by the grouped TMB comparison" }
+tmb_groups = { type = "string_array", optional = true, doc = "Exactly two distinct clinical group labels to compare with a Wilcoxon TMB test (tmb operation only)" }
+top_n = { type = "int", default = 20, min = 1.0, doc = "Number of genes reported by the top_genes operation" }
+gene_col = { type = "string", default = "Hugo_Symbol", doc = "MAF column holding the gene symbol" }
+variant_col = { type = "string", default = "Variant_Classification", doc = "MAF column holding the variant classification" }
+tumor_sample_col = { type = "string", default = "Tumor_Sample_Barcode", doc = "MAF column holding the tumor sample identifier" }
+variant_type_col = { type = "string", default = "Variant_Type", doc = "MAF column holding the variant type" }
+chromosome_col = { type = "string", default = "Chromosome", doc = "MAF column holding the chromosome" }
+start_position_col = { type = "string", default = "Start_Position", doc = "MAF column holding the start position" }
+end_position_col = { type = "string", default = "End_Position", doc = "MAF column holding the end position" }
+reference_allele_col = { type = "string", default = "Reference_Allele", doc = "MAF column holding the reference allele" }
+tumor_seq_allele_col = { type = "string", default = "Tumor_Seq_Allele2", doc = "MAF column holding the tumor seq allele 2" }
+
+[nodes.command]
+interpreter = "Rscript"
+script_file = "scripts/mutation_analysis.R.sh"
+
+[nodes.command.env]
+MUTATION_OPERATION = "{{ operation }}"
+MUTATION_PANEL_SIZE_MB = "{{ panel_size_mb }}"
+MUTATION_TMB_GROUP_COL = "{{ tmb_group_col }}"
+MUTATION_TMB_GROUPS = "{{ tmb_groups }}"
+MUTATION_TOP_N = "{{ top_n }}"
+MUTATION_GENE_COL = "{{ gene_col }}"
+MUTATION_VARIANT_COL = "{{ variant_col }}"
+MUTATION_TUMOR_SAMPLE_COL = "{{ tumor_sample_col }}"
+MUTATION_VARIANT_TYPE_COL = "{{ variant_type_col }}"
+MUTATION_CHROMOSOME_COL = "{{ chromosome_col }}"
+MUTATION_START_POSITION_COL = "{{ start_position_col }}"
+MUTATION_END_POSITION_COL = "{{ end_position_col }}"
+MUTATION_REFERENCE_ALLELE_COL = "{{ reference_allele_col }}"
+MUTATION_TUMOR_SEQ_ALLELE_COL = "{{ tumor_seq_allele_col }}"
+
+[nodes.resources]
+cpus = 2.0
+memory = "8Gi"
+pids_limit = 512
+shm_size = "1Gi"
